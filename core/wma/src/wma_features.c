@@ -74,6 +74,12 @@
 #include <wlan_crypto_global_api.h>
 #include "cdp_txrx_host_stats.h"
 #include "target_if_cm_roam_event.h"
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+//add for  connectivity power monitor
+#include <linux/workqueue.h>
+#include <linux/miscdevice.h>
+#include <linux/fs.h>
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 #include <wlan_mlo_mgr_cmn.h>
 #include "hif.h"
 #include "wlan_cmn_ieee80211.h"
@@ -98,7 +104,11 @@
 #define ADDBA_TXAGGR_SIZE_512 512
 #define ADDBA_TXAGGR_SIZE_BERYLLIUM 1024
 
+#ifndef OPLUS_FEATURE_CONN_POWER_MONITOR
 static bool is_wakeup_event_console_logs_enabled = false;
+#else
+static bool is_wakeup_event_console_logs_enabled = true;
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 
 void wma_set_wakeup_logs_to_console(bool value)
 {
@@ -604,6 +614,137 @@ QDF_STATUS wma_set_wisa_params(tp_wma_handle wma_handle,
 
 	return status;
 }
+
+#ifdef FEATURE_WLAN_APF
+/*
+ * get_fw_active_apf_mode() - convert HDD APF mode to FW configurable APF
+ * mode
+ * @mode: APF mode maintained in HDD
+ *
+ * Return: FW configurable BP mode
+ */
+static enum wmi_host_active_apf_mode
+get_fw_active_apf_mode(enum active_apf_mode mode)
+{
+	switch (mode) {
+	case ACTIVE_APF_DISABLED:
+		return WMI_HOST_ACTIVE_APF_DISABLED;
+	case ACTIVE_APF_ENABLED:
+		return WMI_HOST_ACTIVE_APF_ENABLED;
+	case ACTIVE_APF_ADAPTIVE:
+		return WMI_HOST_ACTIVE_APF_ADAPTIVE;
+	default:
+		wma_err("Invalid Active APF Mode %d; Using 'disabled'", mode);
+		return WMI_HOST_ACTIVE_APF_DISABLED;
+	}
+}
+
+QDF_STATUS wma_enable_active_apf_mode(WMA_HANDLE handle, tAniDHCPInd *ta_dhcp_ind)
+{
+	tp_wma_handle wma_handle = (tp_wma_handle) handle;
+	enum wmi_host_active_apf_mode uc_mode, mcbc_mode;
+	struct vdev_mlme_obj *vdev_mlme;
+	struct wlan_objmgr_vdev *vdev;
+	uint8_t vdev_id;
+	QDF_STATUS ret = QDF_STATUS_SUCCESS;
+
+	if (!ta_dhcp_ind) {
+		wma_err("DHCP indication is NULL");
+		return QDF_STATUS_E_FAILURE;
+	}
+	wma_debug("Enabling active apf mode");
+
+	if (wma_find_vdev_id_by_addr(wma_handle,
+				     ta_dhcp_ind->adapterMacAddr.bytes,
+				     &vdev_id)) {
+		wma_err("Failed to find vdev id for DHCP indication");
+		return QDF_STATUS_E_FAILURE;
+	}
+
+	vdev = wlan_objmgr_get_vdev_by_id_from_psoc(wma_handle->psoc,
+						    vdev_id,
+						    WLAN_LEGACY_WMA_ID);
+	if (!vdev)
+		return -EINVAL;
+
+	vdev_mlme = wlan_vdev_mlme_get_cmpt_obj(vdev);
+	if (!vdev_mlme) {
+		wma_err("Failed to get vdev mlme obj!");
+		ret = -EINVAL;
+		goto release_ref_and_return;
+	}
+	if (vdev_mlme->mgmt.generic.type == WMI_VDEV_TYPE_STA &&
+	    ucfg_pmo_is_apf_enabled(wma_handle->psoc)) {
+		uc_mode = get_fw_active_apf_mode(wma_handle->active_uc_apf_mode);
+		mcbc_mode = get_fw_active_apf_mode(wma_handle->active_mc_bc_apf_mode);
+		wma_debug("Configuring Active APF Mode UC:%d MC/BC:%d for vdev %u",
+			  uc_mode, mcbc_mode, vdev_id);
+
+		ret = wmi_unified_set_active_apf_mode_cmd(wma_handle->wmi_handle, vdev_id,
+							  uc_mode, mcbc_mode);
+
+		if (QDF_IS_STATUS_ERROR(ret))
+			wma_err("Failed to configure active APF mode");
+	}
+release_ref_and_return:
+	wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_WMA_ID);
+	return ret;
+}
+
+QDF_STATUS wma_disable_active_apf_mode(WMA_HANDLE handle, tAniDHCPInd *ta_dhcp_ind)
+{
+	tp_wma_handle wma_handle = (tp_wma_handle)handle;
+	enum wmi_host_active_apf_mode uc_mode, mcbc_mode;
+	struct vdev_mlme_obj *vdev_mlme;
+	struct wlan_objmgr_vdev *vdev;
+	uint8_t vdev_id;
+	QDF_STATUS ret = QDF_STATUS_SUCCESS;
+
+	if (!ta_dhcp_ind) {
+		wma_err("DHCP indication is NULL");
+		return QDF_STATUS_E_FAILURE;
+	}
+
+	wma_debug("Disabling active apf mode");
+
+	if (wma_find_vdev_id_by_addr(wma_handle,
+				     ta_dhcp_ind->adapterMacAddr.bytes,
+				     &vdev_id)) {
+		wma_err("Failed to find vdev id for DHCP indication");
+		return QDF_STATUS_E_FAILURE;
+	}
+
+	vdev = wlan_objmgr_get_vdev_by_id_from_psoc(wma_handle->psoc,
+						    vdev_id,
+						    WLAN_LEGACY_WMA_ID);
+	if (!vdev)
+		return -EINVAL;
+
+	vdev_mlme = wlan_vdev_mlme_get_cmpt_obj(vdev);
+	if (!vdev_mlme) {
+		wma_err("Failed to get vdev mlme obj!");
+		ret = -EINVAL;
+		goto release_ref_and_return;
+	}
+	if (vdev_mlme->mgmt.generic.type == WMI_VDEV_TYPE_STA &&
+	    ucfg_pmo_is_apf_enabled(wma_handle->psoc)) {
+		uc_mode = WMI_HOST_ACTIVE_APF_DISABLED;
+		mcbc_mode = WMI_HOST_ACTIVE_APF_DISABLED;
+
+		wma_debug("Configuring Active APF Mode UC:%d MC/BC:%d for vdev %u",
+			  uc_mode, mcbc_mode, vdev_id);
+
+		ret = wmi_unified_set_active_apf_mode_cmd(wma_handle->wmi_handle, vdev_id,
+							  uc_mode, mcbc_mode);
+
+		if (QDF_IS_STATUS_ERROR(ret))
+			wma_err("Failed to configure active APF mode");
+	}
+release_ref_and_return:
+	wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_WMA_ID);
+	return ret;
+}
+#endif /* FEATURE_WLAN_APF */
 
 /**
  * wma_process_dhcp_ind() - process dhcp indication from SME
@@ -2499,7 +2640,78 @@ static void wma_log_pkt_icmpv4(uint8_t *data, uint32_t length)
 	wma_debug("Pkt_len: %u, Seq_num: %u",
 		 qdf_cpu_to_be16(pkt_len), qdf_cpu_to_be16(seq_num));
 }
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+//add for  connectivity power monitor
+#define RET_ERR  1
+#define RET_OK  0
+#define INIT_FINISHED 1
 
+static struct miscdevice wlan_object;
+static struct work_struct mWork;
+static volatile unsigned char mUeventInit = 0;
+static volatile unsigned char mMiscDevInit = 0;
+static char mUevent[256] = {'\0'};
+
+static void oplusWorkHandler(struct work_struct *data)
+{
+	char *envp[2];
+
+	if (mUevent[0] == '\0')
+		return;
+
+	if ((mMiscDevInit == INIT_FINISHED) && (wlan_object.this_device != NULL)) {
+		envp[0] = mUevent;
+		envp[1] = NULL;
+		kobject_uevent_env(
+			&wlan_object.this_device->kobj,
+			KOBJ_CHANGE, envp);
+	}
+}
+
+int oplusLpmUeventInit(void)
+{
+	int ret = RET_OK;
+
+	INIT_WORK(&mWork, oplusWorkHandler);
+	mUeventInit = INIT_FINISHED;
+	wlan_object.name = "lpm";
+	wlan_object.minor = MISC_DYNAMIC_MINOR;
+	misc_register(&wlan_object);
+	if (wlan_object.this_device != NULL) {
+		ret = kobject_uevent(&wlan_object.this_device->kobj, KOBJ_ADD);
+		if (ret == RET_OK) {
+			mMiscDevInit = INIT_FINISHED;
+		}
+	}
+
+	return RET_OK;
+}
+
+void oplusConnUeventDeinit(void)
+{
+	if (mUeventInit == INIT_FINISHED) {
+		cancel_work_sync(&mWork);
+	}
+	if ((mMiscDevInit == INIT_FINISHED) && (wlan_object.this_device != NULL)) {
+		misc_deregister(&wlan_object);
+	}
+	mUeventInit = 0;
+}
+
+static int oplusLpmSendUevent(const char *src)
+{
+	if (src == NULL) {
+		return RET_ERR;
+	}
+
+	if (mUeventInit == INIT_FINISHED) {
+		strlcpy(mUevent, src, sizeof(mUevent));
+		schedule_work(&mWork);
+	}
+
+	return RET_OK;
+}
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 static void wma_log_pkt_icmpv6(uint8_t *data, uint32_t length)
 {
 	uint16_t pkt_len, seq_num;
@@ -2517,54 +2729,116 @@ static void wma_log_pkt_ipv4(uint8_t *data, uint32_t length)
 {
 	uint16_t pkt_len, src_port, dst_port;
 	char *ip_addr;
-
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+	//add for  connectivity power monitor
+	char event_msg[256] = {'\0'};
+	uint8_t *src_ip;
+	uint8_t *dst_ip;
+	uint8_t poto;
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 	if (length < WMA_IPV4_PKT_INFO_GET_MIN_LEN)
 		return;
 
 	pkt_len = *(uint16_t *)(data + IPV4_PKT_LEN_OFFSET);
 	ip_addr = (char *)(data + IPV4_SRC_ADDR_OFFSET);
+#ifndef OPLUS_CNSS_POWER_DEBUG
 	wma_nofl_debug("src addr %d:%d:%d:%d", ip_addr[0], ip_addr[1],
 		      ip_addr[2], ip_addr[3]);
+#else
+	wma_nofl_alert("src addr %d:%d:%d:%d", ip_addr[0], ip_addr[1],
+		      ip_addr[2], ip_addr[3]);
+#endif /* OPLUS_CNSS_POWER_DEBUG */
 	ip_addr = (char *)(data + IPV4_DST_ADDR_OFFSET);
+#ifndef OPLUS_CNSS_POWER_DEBUG
+	wma_nofl_debug("dst addr %d:%d:%d:%d", ip_addr[0], ip_addr[1],
+		      ip_addr[2], ip_addr[3]);
+#else
+	wma_nofl_alert("dst addr %d:%d:%d:%d", ip_addr[0], ip_addr[1],
+		      ip_addr[2], ip_addr[3]);
+#endif /* OPLUS_CNSS_POWER_DEBUG */
 	wma_nofl_debug("dst addr %d:%d:%d:%d", ip_addr[0], ip_addr[1],
 		      ip_addr[2], ip_addr[3]);
 	src_port = *(uint16_t *)(data + IPV4_SRC_PORT_OFFSET);
 	dst_port = *(uint16_t *)(data + IPV4_DST_PORT_OFFSET);
-	wma_debug("Pkt_len: %u, src_port: %u, dst_port: %u",
-		  qdf_cpu_to_be16(pkt_len),
-		  qdf_cpu_to_be16(src_port),
-		  qdf_cpu_to_be16(dst_port));
+	wma_info("Pkt_len: %u, src_port: %u, dst_port: %u",
+		qdf_cpu_to_be16(pkt_len),
+		qdf_cpu_to_be16(src_port),
+		qdf_cpu_to_be16(dst_port));
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+	//add for  connectivity power monitor
+	src_ip = (char *)(data + IPV4_SRC_ADDR_OFFSET);
+	dst_ip = (char *)(data + IPV4_DST_ADDR_OFFSET);
+	poto = qdf_nbuf_data_get_ipv4_proto(data);
+	snprintf(event_msg, sizeof(event_msg), "wakeup_reason=%d;%d.%d.%d.%d;%u;%d.%d.%d.%d;%u;", poto,
+		src_ip[0], src_ip[1], src_ip[2], src_ip[3], qdf_cpu_to_be16(src_port),
+		dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], qdf_cpu_to_be16(dst_port));
+	oplusLpmSendUevent(event_msg);
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 }
 
 static void wma_log_pkt_ipv6(uint8_t *data, uint32_t length)
 {
 	uint16_t pkt_len, src_port, dst_port;
 	char *ip_addr;
-
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+	//add for  connectivity power monitor
+	char event_msg[256] = {'\0'};
+	uint8_t *src_ip;
+	uint8_t *dst_ip;
+	uint8_t poto;
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 	if (length < WMA_IPV6_PKT_INFO_GET_MIN_LEN)
 		return;
 
 	pkt_len = *(uint16_t *)(data + IPV6_PKT_LEN_OFFSET);
 	ip_addr = (char *)(data + IPV6_SRC_ADDR_OFFSET);
+#ifndef OPLUS_CNSS_POWER_DEBUG
 	wma_nofl_debug("src addr "IPV6_ADDR_STR, ip_addr[0],
 		 ip_addr[1], ip_addr[2], ip_addr[3], ip_addr[4],
 		 ip_addr[5], ip_addr[6], ip_addr[7], ip_addr[8],
 		 ip_addr[9], ip_addr[10], ip_addr[11],
 		 ip_addr[12], ip_addr[13], ip_addr[14],
 		 ip_addr[15]);
+#else
+	wma_nofl_alert("src addr "IPV6_ADDR_STR, ip_addr[0],
+		 ip_addr[1], ip_addr[2], ip_addr[3], ip_addr[4],
+		 ip_addr[5], ip_addr[6], ip_addr[7], ip_addr[8],
+		 ip_addr[9], ip_addr[10], ip_addr[11],
+		 ip_addr[12], ip_addr[13], ip_addr[14],
+		 ip_addr[15]);
+#endif /* OPLUS_CNSS_POWER_DEBUG */
 	ip_addr = (char *)(data + IPV6_DST_ADDR_OFFSET);
+#ifndef OPLUS_CNSS_POWER_DEBUG
 	wma_nofl_debug("dst addr "IPV6_ADDR_STR, ip_addr[0],
 		 ip_addr[1], ip_addr[2], ip_addr[3], ip_addr[4],
 		 ip_addr[5], ip_addr[6], ip_addr[7], ip_addr[8],
 		 ip_addr[9], ip_addr[10], ip_addr[11],
 		 ip_addr[12], ip_addr[13], ip_addr[14],
 		 ip_addr[15]);
+#else
+	wma_nofl_alert("dst addr "IPV6_ADDR_STR, ip_addr[0],
+		 ip_addr[1], ip_addr[2], ip_addr[3], ip_addr[4],
+		 ip_addr[5], ip_addr[6], ip_addr[7], ip_addr[8],
+		 ip_addr[9], ip_addr[10], ip_addr[11],
+		 ip_addr[12], ip_addr[13], ip_addr[14],
+		 ip_addr[15]);
+#endif /* OPLUS_CNSS_POWER_DEBUG */
 	src_port = *(uint16_t *)(data + IPV6_SRC_PORT_OFFSET);
 	dst_port = *(uint16_t *)(data + IPV6_DST_PORT_OFFSET);
 	wma_info("Pkt_len: %u, src_port: %u, dst_port: %u",
 		 qdf_cpu_to_be16(pkt_len),
 		 qdf_cpu_to_be16(src_port),
 		 qdf_cpu_to_be16(dst_port));
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+	//add for  connectivity power monitor
+	src_ip = (char *)(data + IPV6_SRC_ADDR_OFFSET);
+	dst_ip = (char *)(data + IPV6_DST_ADDR_OFFSET);
+	poto = qdf_nbuf_data_get_ipv6_proto(data);
+	snprintf(event_msg, sizeof(event_msg), "wakeup_reason=%d;%pI6;%u;%pI6;%u;", poto,
+		src_ip, qdf_cpu_to_be16(src_port),
+		dst_ip, qdf_cpu_to_be16(dst_port));
+	oplusLpmSendUevent(event_msg);
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 }
 
 static void wma_log_pkt_tcpv4(uint8_t *data, uint32_t length)
@@ -2627,6 +2901,11 @@ static void wma_wow_parse_data_pkt(t_wma_handle *wma,
 	uint8_t *dest_mac;
 	const char *proto_subtype_name;
 	enum qdf_proto_subtype proto_subtype;
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+	//add for  connectivity power monitor
+	char event_msg[256] = {'\0'};
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
+
 
 	wma_debug("packet length: %u", length);
 	if (length < QDF_NBUF_TRAC_IPV4_OFFSET)
@@ -2646,6 +2925,12 @@ static void wma_wow_parse_data_pkt(t_wma_handle *wma,
 	if (proto_subtype_name)
 		wma_conditional_log(is_wakeup_event_console_logs_enabled,
 				    "WOW Wakeup: %s rcvd", proto_subtype_name);
+
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+	//add for  connectivity power monitor
+	snprintf(event_msg, sizeof(event_msg), "wakeup_package=%s", proto_subtype_name);
+	oplusLpmSendUevent(event_msg);
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 
 	switch (proto_subtype) {
 	case QDF_PROTO_EAPOL_M1:
@@ -2931,6 +3216,9 @@ static int wma_wake_event_packet(
 
 	wma_debug("Number of delayed packets received = %d",
 		  wake_info->delayed_pkt_count);
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+	wma_info("Wake event packet %s", wma_wow_wake_reason_str(wake_info->wake_reason));
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 
 	switch (wake_info->wake_reason) {
 	case WOW_REASON_AUTH_REQ_RECV:
@@ -3211,6 +3499,23 @@ static void wma_wake_event_log_reason(t_wma_handle *wma,
 	/* "Unspecified" means APPS triggered wake, else firmware triggered */
 	if (wake_info->wake_reason != WOW_REASON_UNSPECIFIED) {
 		vdev = &wma->interfaces[wake_info->vdev_id];
+		#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+		//add for  connectivity power monitor
+		if(wake_info->wake_reason == WOW_REASON_BEACON_RECV) {
+		    char event_msg[256] = {'\0'};
+		    snprintf(event_msg, sizeof(event_msg), "wakeup_mgmt=%s", wma_wow_wake_reason_str(wake_info->wake_reason));
+		    oplusLpmSendUevent(event_msg);
+		}
+		/* Special handling for LOCAL_DATA_UC_DROP wakeup */
+		//add for 9872014 connectivity power monitor
+		if (wake_info->wake_reason == WOW_REASON_LOCAL_DATA_UC_DROP) {
+		    wma_nofl_info("Reporting WOW wakeup to framework: LOCAL_DATA_UC_DROP (%d)",wake_info->wake_reason);
+		    char event_msg[256] = {'\0'};
+		    snprintf(event_msg, sizeof(event_msg), "wakeup_mgmt=%s", wma_wow_wake_reason_str(wake_info->wake_reason));
+		    /* Report to framework via uevent */
+		    oplusLpmSendUevent(event_msg);
+		}
+		#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 		wma_nofl_info("WLAN triggered wakeup: %s (%d), vdev: %d (%s)",
 			      wma_wow_wake_reason_str(wake_info->wake_reason),
 			      wake_info->wake_reason,

@@ -4845,7 +4845,10 @@ QDF_STATUS wma_start(void)
 		goto end;
 	}
 	wma_register_spectral_cmds(wma_handle);
-
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+//add for  connectivity power monitor
+	oplusLpmUeventInit();
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 end:
 	wma_debug("Exit");
 	return qdf_status;
@@ -4888,7 +4891,10 @@ QDF_STATUS wma_stop(void)
 		qdf_mem_free(wma_handle->ack_work_ctx);
 		wma_handle->ack_work_ctx = NULL;
 	}
-
+#ifdef OPLUS_FEATURE_CONN_POWER_MONITOR
+//add for  connectivity power monitor
+	oplusConnUeventDeinit();
+#endif /* OPLUS_FEATURE_CONN_POWER_MONITOR */
 	/* Destroy the timer for log completion */
 	qdf_status = qdf_mc_timer_destroy(&wma_handle->log_completion_timer);
 	if (qdf_status != QDF_STATUS_SUCCESS)
@@ -9455,8 +9461,11 @@ static QDF_STATUS wma_mc_process_msg(struct scheduler_msg *msg)
 		break;
 #endif /* FEATURE_WLAN_AUTO_SHUTDOWN */
 	case WMA_DHCP_START_IND:
+		wma_process_dhcp_ind(wma_handle, (tAniDHCPInd *)msg->bodyptr);
+		qdf_mem_free(msg->bodyptr);
+		break;
 	case WMA_DHCP_STOP_IND:
-		wma_process_dhcp_ind(wma_handle, (tAniDHCPInd *) msg->bodyptr);
+		wma_process_dhcp_ind(wma_handle, (tAniDHCPInd *)msg->bodyptr);
 		qdf_mem_free(msg->bodyptr);
 		break;
 	case WMA_INIT_THERMAL_INFO_CMD:
@@ -9885,6 +9894,16 @@ static QDF_STATUS wma_mc_process_msg(struct scheduler_msg *msg)
 				(struct edca_pifs_vparam *)msg->bodyptr);
 		qdf_mem_free(msg->bodyptr);
 		break;
+#ifdef FEATURE_WLAN_APF
+	case WMA_ENABLE_ACTIVE_APF_MODE_IND:
+		wma_enable_active_apf_mode(wma_handle, (tAniDHCPInd *)msg->bodyptr);
+		qdf_mem_free(msg->bodyptr);
+		break;
+	case WMA_DISABLE_ACTIVE_APF_MODE_IND:
+		wma_disable_active_apf_mode(wma_handle, (tAniDHCPInd *)msg->bodyptr);
+		qdf_mem_free(msg->bodyptr);
+		break;
+#endif
 	default:
 		wma_debug("Unhandled WMA message of type %d", msg->type);
 		if (msg->bodyptr)
