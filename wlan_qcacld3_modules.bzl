@@ -2386,6 +2386,7 @@ def _define_module_for_target_variant_chipset(target, variant, chipset):
         out = out,
         kernel_build = kernel_build,
         deps = deps,
+        local_defines = ["OPLUS_BUG_STABILITY"],
     )
 
 def define_dist(target, variant, chipsets):
